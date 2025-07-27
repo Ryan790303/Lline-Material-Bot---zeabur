@@ -1,0 +1,20 @@
+{
+  "name": "lline-material-bot---zeabur",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@line/bot-sdk": "^10.0.0",
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "googleapis": "^154.0.0",
+    "node-cache": "^5.1.2"
+  }
+}
