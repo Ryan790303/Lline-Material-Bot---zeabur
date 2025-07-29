@@ -16,7 +16,7 @@ const app = express();
 const client = new line.Client(config);
 
 app.post('/webhook', line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent))
+  Promise.all(req.body.events.map(event => handleEvent(event, client))) // <-- 修改處
     .then((result) => res.json(result))
     .catch((err) => {
       console.error(err);
@@ -24,13 +24,13 @@ app.post('/webhook', line.middleware(config), (req, res) => {
     });
 });
 
-async function handleEvent(event) {
+async function handleEvent(event, client) { // <-- 修改處
   if (event.type !== 'message' && event.type !== 'postback') {
     return Promise.resolve(null);
   }
 
   // 3. 將讀取好的 CONFIG 傳遞給總機
-  const replyMessages = await mainHandler(event, config.channelAccessToken, CONFIG);
+  const replyMessages = await mainHandler(event, client, CONFIG); // <-- 修改處
 
   if (replyMessages && replyMessages.length > 0) {
     return client.replyMessage(event.replyToken, replyMessages);

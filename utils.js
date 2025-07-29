@@ -2,6 +2,27 @@
 const sheets = require('./google-sheets-client');
 const NodeCache = require('node-cache');
 const axios = require('axios');
+const dayjs = require('dayjs');
+const customParseFormat = require('dayjs/plugin/customParseFormat'); // 引入客製化格式解析插件
+dayjs.extend(customParseFormat);
+
+// --- 修改處 START ---
+const { google } = require('googleapis');
+
+// 建立並設定 OAuth2 用戶端
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  'http://localhost:3000/oauth2callback' // 此處的重新導向 URI 僅為建立物件所需，不會在伺服器端被使用
+);
+// 設定我們儲存好的 Refresh Token，讓用戶端可以自動更新 Access Token
+oauth2Client.setCredentials({
+  refresh_token: process.env.GOOGLE_REFRESH_TOKEN
+});
+
+// 初始化一個使用 OAuth 驗證的 Drive 服務
+const drive = google.drive({ version: 'v3', auth: oauth2Client });
+// --- 修改處 END ---
 
 // 建立一個快取實例，stdTTL 是標準的過期秒數 (5 分鐘)
 const appCache = new NodeCache({ stdTTL: 300 });
@@ -128,7 +149,7 @@ async function getUsersMap(CONFIG) {
   }
 }
 
-async function getUserProfile(userId, token, CONFIG) {
+async function getUserProfile(userId, client, CONFIG) {
   try {
     const usersMap = await getUsersMap(CONFIG);
     if (usersMap.has(userId)) {
@@ -136,6 +157,7 @@ async function getUserProfile(userId, token, CONFIG) {
     }
 
     console.log('新使用者，開始呼叫 LINE Profile API...');
+    const token = client.config.channelAccessToken;
     const response = await axios.get(`https://api.line.me/v2/bot/profile/${userId}`, {
       headers: { 'Authorization': 'Bearer ' + token }
     });
@@ -178,7 +200,17 @@ async function getUserRecords(userName, CONFIG) {
       }
     }
 
-    userRecords.sort((a, b) => new Date(b.data[11]) - new Date(a.data[11]));
+    // --- 修改處 START ---
+    // 定義一個符合您試算表格式的樣板
+    // YYYY: 四位數年, M: 月, D: 日
+    // A: 上午/下午, hh: 12小時制的小時
+    const customTimeFormat = 'YYYY/M/D A h:mm:ss';
+    
+    // 使用 dayjs 和我們定義的格式樣板來進行精準排序
+    userRecords.sort((a, b) => {
+      return dayjs(b.data[11], customTimeFormat) - dayjs(a.data[11], customTimeFormat);
+    });
+    // --- 修改處 END ---
     
     return userRecords.slice(0, limit);
   } catch (err) {
@@ -243,7 +275,7 @@ async function addTransactionRecord(recordData, userName, CONFIG) {
       hour: 'numeric',
       minute: '2-digit',
       second: '2-digit',
-      hour12: true, // 使用上午/下午格式
+      hour12: true,
     });
     const newRow = [
       recordData.分類, `'${recordData.序號}`, recordData.品名,
@@ -331,6 +363,53 @@ async function updateRecordCells(rowIndex, updateObject, CONFIG) {
   }
 }
 
+/**
+ * @description 接收 LINE 的圖片 messageId，下載後上傳至 Google Drive，並回傳公開網址
+ * @param {line.Client} lineClient - 已初始化的 LINE Client 物件
+ * @param {string} messageId - 來自 LINE 事件的圖片 message ID
+ * @returns {Promise<string|null>} 成功時回傳公開的圖片網址，失敗時回傳 null
+ */
+async function uploadImageToDrive(lineClient, messageId) {
+  try {
+    console.log(`準備從 LINE 下載圖片 (ID: ${messageId})...`);
+    const imageStream = await lineClient.getMessageContent(messageId);
+    
+    console.log('圖片下載完成，準備上傳至 Google Drive...');
+    const response = await drive.files.create({
+      supportsAllDrives: true, // 確保支援共用雲端硬碟
+      requestBody: {
+        name: `${messageId}.jpg`,
+        parents: [process.env.GOOGLE_DRIVE_FOLDER_ID]
+      },
+      media: {
+        mimeType: 'image/jpeg',
+        body: imageStream,
+      },
+      fields: 'id' 
+    });
+
+    const fileId = response.data.id;
+    console.log(`✅ 檔案成功上傳至 Google Drive，File ID: ${fileId}`);
+    
+    // 將檔案權限設定為公開可讀
+    await drive.permissions.create({
+      fileId: fileId,
+      requestBody: {
+        role: 'reader',
+        type: 'anyone',
+      }
+    });
+    console.log('✅ 檔案權限已設定為公開。');
+
+    const publicUrl = `https://drive.google.com/uc?export=view&id=${fileId}`;
+    return publicUrl;
+
+  } catch (error) {
+    console.error('uploadImageToDrive 函式發生錯誤:', error.message);
+    return null; // 發生錯誤時回傳 null
+  }
+}
+
 // 將所有函式匯出
 module.exports = {
   sheets,
@@ -347,4 +426,5 @@ module.exports = {
   addTransactionRecord,
   voidRecordByRowIndex,
   updateRecordCells,
+  uploadImageToDrive,
 };

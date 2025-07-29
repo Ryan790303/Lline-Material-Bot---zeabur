@@ -21,7 +21,8 @@ function getEventData(event) {
  * @param {Object} CONFIG - 從試算表讀取的設定物件
  * @returns {Array} - 一個包含要回覆訊息物件的陣列
  */
-async function startFlow(event, token, CONFIG) {
+// 修正(1): 接收完整的 client 物件，而不是只接收 token
+async function startFlow(event, client, CONFIG) {
   const userId = event.source.userId;
   const userProperties = getProperties(userId);
   const action = event.postback.data.split('=')[1];
@@ -65,7 +66,7 @@ async function startFlow(event, token, CONFIG) {
       break;
     }
     case 'edit': {
-      const { displayName } = await utils.getUserProfile(userId, token, CONFIG);
+      const { displayName } = await utils.getUserProfile(userId, client, CONFIG);
       const records = await utils.getUserRecords(displayName, CONFIG);
       replyMessages.push(await formatters.formatUserRecords(records, CONFIG));
       break;
@@ -96,7 +97,8 @@ async function startFlow(event, token, CONFIG) {
  * @param {Object} CONFIG - 從試算表讀取的設定物件
  * @returns {Array} - 一個包含要回覆訊息物件的陣列
  */
-async function handleQueryFlow(event, token, CONFIG) {
+async function handleQueryFlow(event, client, CONFIG) {
+  const userId = event.source.userId;
   const userProperties = getProperties(event.source.userId);
   const state = userProperties.getProperty('state');
   const data = getEventData(event);
@@ -116,7 +118,7 @@ async function handleQueryFlow(event, token, CONFIG) {
       const allInventory = await utils.getAllInventory(CONFIG);
       replyMessages.push(formatters.formatSearchResults(allInventory, 'query', CONFIG));
     } else if (type === '查我的經手紀錄') {
-      const { displayName } = await utils.getUserProfile(event.source.userId, token, CONFIG);
+      const { displayName } = await utils.getUserProfile(userId, client, CONFIG);
       const records = await utils.getUserRecords(displayName, CONFIG);
       replyMessages.push(await formatters.formatUserRecords(records, CONFIG));
     }
@@ -145,7 +147,8 @@ async function handleQueryFlow(event, token, CONFIG) {
  * @param {Object} CONFIG - 從試算表讀取的設定物件
  * @returns {Array} - 一個包含要回覆訊息物件的陣列
  */
-async function handleAddFlow(event, token, CONFIG) {
+async function handleAddFlow(event, client, CONFIG) {
+  const userId = event.source.userId;
   const userProperties = getProperties(event.source.userId);
   const state = userProperties.getProperty('state');
   const eventType = event.type;
@@ -229,6 +232,7 @@ async function handleAddFlow(event, token, CONFIG) {
       replyMessages.push({ type: 'text', text: confirmText, quickReply: { items: confirmButtons } });
       break;
       
+    // --- 修改處 START ---
     case 'add_awaiting_confirmation': {
       if (eventType !== 'postback' || !data.startsWith('add_confirm=')) return [];
       if (value === '確認新增') {
@@ -236,20 +240,42 @@ async function handleAddFlow(event, token, CONFIG) {
         if (isDuplicate) {
           const errorMessage = formatters.getConfigMessage('ERROR_DUPLICATE_ITEM', { name: tempData.品名, model: tempData.型號, spec: tempData.規格 }, CONFIG);
           replyMessages.push({ type: 'text', text: errorMessage });
+          userProperties.deleteAllProperties(); // 發現重複，直接結束流程
+          nextState = null;
         } else {
-          tempData.序號 = await utils.generateNewSerial(tempData.分類, CONFIG);
-          tempData.類型 = '新增';
-          const { displayName } = await utils.getUserProfile(event.source.userId, token, CONFIG);
-          await utils.addTransactionRecord(tempData, displayName, CONFIG);
-          replyMessages.push({ type: 'text', text: formatters.getConfigMessage('MSG_ADD_SUCCESS', { id: `${tempData.分類}${tempData.序號}` }, CONFIG) });
+          // 資料不直接寫入，而是進入下一個等待圖片的狀態
+          nextState = 'add_awaiting_photo';
+          const photoPromptButtons = [{ type: 'action', action: { type: 'postback', label: '無圖片', data: 'add_photo_choice=skip' } }];
+          replyMessages.push({ type: 'text', text: formatters.getConfigMessage('PROMPT_ADD_PHOTO', {}, CONFIG), quickReply: { items: photoPromptButtons } });
         }
       } else {
+        // 使用者點擊「取消」
         replyMessages.push({ type: 'text', text: formatters.getConfigMessage('MSG_CANCEL_CONFIRM', {}, CONFIG) });
+        userProperties.deleteAllProperties();
+        nextState = null;
       }
+      break;
+    }
+
+        // --- 新增 state: add_awaiting_photo ---
+    case 'add_awaiting_photo': {
+      // 這個 state 只處理「無圖片」按鈕的 postback
+      // 圖片訊息由 mainHandler 直接攔截處理
+      if (eventType !== 'postback' || !data.startsWith('add_photo_choice=skip')) return [];
+
+      tempData.照片 = ''; // 將照片欄位設為空白
+      tempData.序號 = await utils.generateNewSerial(tempData.分類, CONFIG);
+      tempData.類型 = '新增';
+
+      const { displayName } = await utils.getUserProfile(userId, client, CONFIG);
+      await utils.addTransactionRecord(tempData, displayName, CONFIG);
+      replyMessages.push({ type: 'text', text: formatters.getConfigMessage('MSG_ADD_SUCCESS', { id: `${tempData.分類}${tempData.序號}` }, CONFIG) });
+      
       userProperties.deleteAllProperties();
       nextState = null;
       break;
     }
+    // --- 修改處 END ---
   }
 
   if (nextState) {
@@ -266,7 +292,8 @@ async function handleAddFlow(event, token, CONFIG) {
  * @param {Object} CONFIG - 從試算表讀取的設定物件
  * @returns {Array} - 一個包含要回覆訊息物件的陣列
  */
-async function handleStockFlow(event, token, CONFIG) {
+async function handleStockFlow(event, client, CONFIG) {
+  const userId = event.source.userId;
   const userProperties = getProperties(event.source.userId);
   const state = userProperties.getProperty('state');
   const eventType = event.type;
@@ -307,7 +334,7 @@ async function handleStockFlow(event, token, CONFIG) {
           數量: tempData.action === 'inbound' ? tempData.quantity : -tempData.quantity,
           類型: tempData.action === 'inbound' ? '入庫' : '出庫',
         };
-        const { displayName } = await utils.getUserProfile(event.source.userId, token, CONFIG);
+        const { displayName } = await utils.getUserProfile(userId, client, CONFIG);
         await utils.addTransactionRecord(record, displayName, CONFIG);
         
         const newStockItem = await utils.searchMaterialByCompositeKey(`${item.分類}${item.序號}`, CONFIG);
@@ -370,7 +397,8 @@ async function handleStockFlow(event, token, CONFIG) {
  * @param {Object} CONFIG - 從試算表讀取的設定物件
  * @returns {Array} - 一個包含要回覆訊息物件的陣列
  */
-async function handleEditFlow(event, token, CONFIG) {
+async function handleEditFlow(event, client, CONFIG) {
+  const userId = event.source.userId;
   const userProperties = getProperties(event.source.userId);
   const state = userProperties.getProperty('state');
   const eventType = event.type;
@@ -411,7 +439,7 @@ async function handleEditFlow(event, token, CONFIG) {
   }
   
   async function finalizeEdit() {
-    const { displayName } = await utils.getUserProfile(event.source.userId, token, CONFIG);
+    const { displayName } = await utils.getUserProfile(userId, client, CONFIG);
     const finalData = tempData.newData;
     const originalRecord = tempData.originalRecord;
     const rowIndex = tempData.rowIndex;
@@ -573,7 +601,8 @@ async function handleEditFlow(event, token, CONFIG) {
  * @param {Object} CONFIG - 從試算表讀取的設定物件
  * @returns {Array} - 一個包含要回覆訊息物件的陣列
  */
-async function handleDeleteFlow(event, token, CONFIG) {
+async function handleDeleteFlow(event, client, CONFIG) {
+  const userId = event.source.userId;
   const userProperties = getProperties(event.source.userId);
   const state = userProperties.getProperty('state');
   const eventType = event.type;
@@ -618,7 +647,7 @@ async function handleDeleteFlow(event, token, CONFIG) {
     
     if (choice === 'yes') {
       const rowIndex = tempData.rowIndex;
-      const { displayName } = await utils.getUserProfile(event.source.userId, token, CONFIG);
+      const { displayName } = await utils.getUserProfile(userId, client, CONFIG);
       const reason = CONFIG.DEFAULT_DELETE_REASON || '資料錯誤';
       await utils.voidRecordByRowIndex(rowIndex, reason, displayName, CONFIG);
       replyMessages.push({ type: 'text', text: formatters.getConfigMessage('MSG_DELETE_SUCCESS', {}, CONFIG) });
@@ -643,16 +672,43 @@ async function handleDeleteFlow(event, token, CONFIG) {
  * @param {Object} CONFIG - 從試算表讀取的設定物件
  * @returns {Array} - 一個包含要回覆訊息物件的陣列
  */
-async function mainHandler(event, token, CONFIG) {
+async function mainHandler(event, client, CONFIG) { // <-- 修改處：接收 client
   const userId = event.source.userId;
   const userProperties = getProperties(userId);
   const state = userProperties.getProperty('state');
   const eventType = event.type;
+
+    // --- 新增區塊 START ---
+  // 優先處理：如果使用者正處於等待上傳照片的狀態，且傳來的是圖片
+  if (eventType === 'message' && event.message.type === 'image' && state === 'add_awaiting_photo') {
+    let tempData = JSON.parse(userProperties.getProperty('temp_data') || '{}');
+    const imageUrl = await utils.uploadImageToDrive(client, event.message.id);
+
+    if (imageUrl) {
+      tempData.照片 = imageUrl;
+
+      // --- 修改處 START ---
+      // 在寫入資料庫前，完成最後的資料準備
+      tempData.序號 = await utils.generateNewSerial(tempData.分類, CONFIG);
+      tempData.類型 = '新增';
+      // --- 修改處 END ---
+
+      const { displayName } = await utils.getUserProfile(userId, client, CONFIG);
+      await utils.addTransactionRecord(tempData, displayName, CONFIG);
+      userProperties.deleteAllProperties();
+      return [{ type: 'text', text: formatters.getConfigMessage('MSG_ADD_SUCCESS_WITH_PHOTO', { id: `${tempData.分類}${tempData.序號}` }, CONFIG) }];
+    } else {
+      // 上傳失敗
+      userProperties.deleteAllProperties();
+      return [{ type: 'text', text: formatters.getConfigMessage('ERROR_UPLOAD_FAILED', {}, CONFIG) }];
+    }
+  }
+  // --- 新增區塊 END ---
   
   // 優先處理會重置流程的主選單指令
   if (eventType === 'postback' && event.postback.data.startsWith('action=')) {
     userProperties.deleteAllProperties();
-    return await startFlow(event, token, CONFIG);
+    return await startFlow(event, client, CONFIG);
   }
   
   // 根據 state 或 postback 指令判斷目前屬於哪個流程
@@ -671,15 +727,15 @@ async function mainHandler(event, token, CONFIG) {
   // 根據流程類型，將事件轉交給對應的處理器
   switch (flowType) {
     case 'query':
-      return await handleQueryFlow(event, token, CONFIG);
+      return await handleQueryFlow(event, client.config.channelAccessToken, CONFIG);
     case 'add':
-      return await handleAddFlow(event, token, CONFIG);
+      return await handleAddFlow(event, client.config.channelAccessToken, CONFIG);
     case 'stock':
-      return await handleStockFlow(event, token, CONFIG);
+      return await handleStockFlow(event, client.config.channelAccessToken, CONFIG);
     case 'edit':
-      return await handleEditFlow(event, token, CONFIG);
+      return await handleEditFlow(event, client.config.channelAccessToken, CONFIG);
     case 'delete':
-      return await handleDeleteFlow(event, token, CONFIG);
+      return await handleDeleteFlow(event, client.config.channelAccessToken, CONFIG);
     default:
       console.log('沒有對應的 flowType，不進行任何回覆。');
       return [];

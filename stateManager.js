@@ -12,6 +12,10 @@ function getProperties(userId) {
     getProperty: (key) => userStates[userId][key] || null,
     setProperty: (key, value) => { userStates[userId][key] = value; },
     deleteAllProperties: () => { userStates[userId] = {}; },
+    // --- 修改處 START ---
+    // 補上遺漏的 deleteProperty 函式
+    deleteProperty: (key) => { delete userStates[userId][key]; },
+    // --- 修改處 END ---
   };
 }
 
