@@ -278,10 +278,19 @@ async function addTransactionRecord(recordData, userName, CONFIG) {
       hour12: true,
     });
     const newRow = [
-      recordData.分類, `'${recordData.序號}`, recordData.品名,
-      recordData.型號 || '', recordData.規格 || '', recordData.單位,
-      Number(recordData.數量), recordData.類型, CONFIG.STATUS_VALID || '有效',
-      '', userName, timestamp, recordData.照片 || '' // 使用格式化後的 timestamp
+      recordData.分類,
+      `'${recordData.序號}`, // 序號維持文字格式
+      recordData.品名,
+      recordData.型號 ? `'${recordData.型號}` : '', // 型號強制為文字格式
+      recordData.規格 ? `'${recordData.規格}` : '', // 規格強制為文字格式
+      recordData.單位,
+      Number(recordData.數量),
+      recordData.類型,
+      CONFIG.STATUS_VALID || '有效',
+      '',
+      userName,
+      timestamp,
+      recordData.照片 || ''
     ];
 
     await sheets.spreadsheets.values.append({

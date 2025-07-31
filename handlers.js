@@ -319,7 +319,12 @@ async function handleStockFlow(event, client, CONFIG) {
         tempData.action = params.action;
         nextState = `stock_${params.action}_awaiting_quantity`;
         const actionText = params.action === 'inbound' ? '入庫' : '出庫';
-        replyMessages.push({ 'type': 'text', 'text': formatters.getConfigMessage('PROMPT_STOCK_QUANTITY', { name: selectedMaterial.品名, action: actionText }, CONFIG) });
+        replyMessages.push({ 'type': 'text', 'text': formatters.getConfigMessage('PROMPT_STOCK_QUANTITY', { 
+          name: selectedMaterial.品名, 
+          model: selectedMaterial.型號 || '-', 
+          spec: selectedMaterial.規格 || '-', 
+          action: actionText 
+        }, CONFIG) });
       } else {
         replyMessages.push({ 'type': 'text', 'text': formatters.getConfigMessage('MSG_QUERY_NOT_FOUND', {}, CONFIG) });
         userProperties.deleteAllProperties();
@@ -339,7 +344,15 @@ async function handleStockFlow(event, client, CONFIG) {
         
         const newStockItem = await utils.searchMaterialByCompositeKey(`${item.分類}${item.序號}`, CONFIG);
         const successIcon = tempData.action === 'inbound' ? '✅' : '➡️';
-        replyMessages.push({ 'type': 'text', 'text': formatters.getConfigMessage('MSG_STOCK_SUCCESS', { icon: successIcon, action: record.類型, name: item.品名, newStock: newStockItem.庫存, unit: item.單位 }, CONFIG) });
+        replyMessages.push({ 'type': 'text', 'text': formatters.getConfigMessage('MSG_STOCK_SUCCESS', { 
+          icon: successIcon, 
+          action: record.類型, 
+          name: item.品名, 
+          model: item.型號 || '-', // 新增 model，如果沒有則顯示 '-'
+          spec: item.規格 || '-',  // 新增 spec，如果沒有則顯示 '-'
+          newStock: newStockItem.庫存, 
+          unit: item.單位 
+        }, CONFIG) });
       } else {
         replyMessages.push({ 'type': 'text', 'text': formatters.getConfigMessage('MSG_CANCEL_CONFIRM', {}, CONFIG) });
       }
@@ -361,13 +374,26 @@ async function handleStockFlow(event, client, CONFIG) {
         const quantity = Number(data);
         const item = tempData.selectedItem;
         if (action === 'outbound' && item.庫存 < quantity) {
-          replyMessages.push({ 'type': 'text', 'text': formatters.getConfigMessage('MSG_STOCK_INSUFFICIENT', { name: item.品名, currentStock: item.庫存, unit: item.單位 }, CONFIG) });
+          replyMessages.push({ 'type': 'text', 'text': formatters.getConfigMessage('MSG_STOCK_INSUFFICIENT', { 
+            name: item.品名, 
+            model: item.型號 || '-',
+            spec: item.規格 || '-',
+            currentStock: item.庫存, 
+            unit: item.單位 
+          }, CONFIG) });
           userProperties.deleteAllProperties();
         } else {
           tempData.quantity = quantity;
           nextState = `stock_${action}_awaiting_confirmation`;
           const actionText = action === 'inbound' ? '入庫' : '出庫';
-          const confirmText = formatters.getConfigMessage('PROMPT_STOCK_CONFIRM_PROMPT', { action: actionText, name: item.品名, quantity: quantity, unit: item.單位 }, CONFIG);
+          const confirmText = formatters.getConfigMessage('PROMPT_STOCK_CONFIRM_PROMPT', { 
+            action: actionText, 
+            name: item.品名, 
+            model: item.型號 || '-',
+            spec: item.規格 || '-',
+            quantity: quantity, 
+            unit: item.單位 
+          }, CONFIG);
           const confirmButtons = [
             { type: 'action', action: { type: 'postback', label: `確認${actionText}`, data: 'stock_confirm=確認' }},
             { type: 'action', action: { type: 'postback', label: '取消', data: 'stock_confirm=取消' }}
@@ -427,8 +453,11 @@ async function handleEditFlow(event, client, CONFIG) {
   
   function sendStockEditMenu(leadingText = '') {
     const promptText = formatters.getConfigMessage('PROMPT_EDIT_STOCK_CHOICE', {
-      leadingText: leadingText, name: tempData.newData.品名,
-      type: tempData.newData.類型, quantity: tempData.newData.數量
+      leadingText: leadingText,
+      name: tempData.newData.品名,
+      model: tempData.newData.型號 || '-', // 新增 model
+      spec: tempData.newData.規格 || '-',  // 新增 spec
+      type: tempData.newData.類型
     }, CONFIG);
     const choiceButtons = [
       { type: 'action', action: { type: 'postback', label: CONFIG.LABEL_EDIT_QUANTITY || '修改數量', data: 'edit_stock_choice=quantity' }},
@@ -629,6 +658,8 @@ async function handleDeleteFlow(event, client, CONFIG) {
     const response = await utils.sheets.spreadsheets.values.get({ spreadsheetId, range });
     const recordData = response.data.values[0];
     const recordName = recordData[2]; // 品名
+    const recordModel = recordData[3] || '-'; // 型號
+    const recordSpec = recordData[4] || '-';  // 規格
     const recordType = recordData[7]; // 類型
 
     tempData.rowIndex = rowIndex;
