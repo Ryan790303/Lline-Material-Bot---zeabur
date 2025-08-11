@@ -12,9 +12,11 @@
   "dependencies": {
     "@line/bot-sdk": "^10.0.0",
     "axios": "^1.11.0",
+    "dayjs": "^1.11.13",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "googleapis": "^154.0.0",
-    "node-cache": "^5.1.2"
+    "node-cache": "^5.1.2",
+    "node-cron": "^4.2.1"
   }
 }

@@ -5,6 +5,7 @@ const axios = require('axios');
 const dayjs = require('dayjs');
 const customParseFormat = require('dayjs/plugin/customParseFormat'); // 引入客製化格式解析插件
 dayjs.extend(customParseFormat);
+const line = require('@line/bot-sdk');
 
 // --- 修改處 START ---
 const { google } = require('googleapis');
@@ -419,6 +420,150 @@ async function uploadImageToDrive(lineClient, messageId) {
   }
 }
 
+/**
+ * @description 將系統事件記錄到 Google Sheets 的 '系統日誌' 分頁
+ * @param {object} eventData - 包含 { status, message } 的物件
+ * @param {object} CONFIG - 全域設定物件
+ */
+async function logSystemEvent(eventData, CONFIG) {
+  try {
+    const logSheetName = CONFIG.SHEET_NAME_LOGS || '系統日誌';
+    const timestamp = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
+    const newRow = [
+      timestamp,
+      eventData.status || '資訊',
+      eventData.message || ''
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: logSheetName,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [newRow] },
+    });
+  } catch (err) {
+    // 如果連寫入日誌都失敗，只能在後台 console 印出錯誤
+    console.error(`寫入系統日誌時發生嚴重錯誤:`, err.message);
+    console.error('原始日誌內容:', eventData);
+  }
+}
+
+/**
+ * @description 執行每月庫存結轉的核心函式
+ */
+async function monthlyClosing(CONFIG) {
+  const recordsSheetName = CONFIG.SHEET_NAME_RECORDS || '出入庫記錄';
+
+  try {
+    // --- 1. 準備工作與安全性檢查 ---
+    const lastMonth = dayjs().subtract(1, 'month');
+    const backupSheetName = lastMonth.format('YYYY年M月記錄');
+
+    console.log(`月結任務：準備備份 ${recordsSheetName} 至 ${backupSheetName}`);
+    
+    // 取得所有工作表，檢查備份是否已存在
+    const spreadsheetInfo = await sheets.spreadsheets.get({ spreadsheetId: process.env.SPREADSHEET_ID });
+    const sheetExists = spreadsheetInfo.data.sheets.some(s => s.properties.title === backupSheetName);
+
+    if (sheetExists) {
+      throw new Error(`備份分頁 ${backupSheetName} 已存在，本月月結可能已執行過，任務中止。`);
+    }
+
+    // 讀取當前所有出入庫紀錄
+    const response = await sheets.spreadsheets.values.get({ spreadsheetId: process.env.SPREADSHEET_ID, range: recordsSheetName });
+    const allRecords = response.data.values || [];
+
+    if (allRecords.length <= 1) { // 只有標題列或沒有任何資料
+      await logSystemEvent({ status: '資訊', message: `月結任務中止：${recordsSheetName} 中沒有需要結轉的資料。` }, CONFIG);
+      console.log(`月結任務：${recordsSheetName} 中沒有資料，任務提前結束。`);
+      return;
+    }
+    
+    const headerRow = allRecords[0];
+    const dataRows = allRecords.slice(1);
+
+    // --- 2. 備份 ---
+    console.log(`月結任務：正在建立備份分頁 ${backupSheetName}...`);
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      resource: { requests: [{ addSheet: { properties: { title: backupSheetName } } }] },
+    });
+
+    console.log(`月結任務：正在將 ${dataRows.length} 筆紀錄寫入備份分頁...`);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `${backupSheetName}!A1`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: allRecords },
+    });
+
+    // --- 3. 統整 (計算月底庫存) ---
+    console.log('月結任務：正在計算月底庫存...');
+    const materialsMap = new Map();
+    const statusValid = CONFIG.STATUS_VALID || '有效';
+
+    for (const row of dataRows) {
+      if (row.length > 8 && row[8] === statusValid) {
+        const compositeKey = (`${row[0]}${row[1]}`).toUpperCase();
+        if (!materialsMap.has(compositeKey)) {
+          materialsMap.set(compositeKey, {
+            分類: row[0], 序號: row[1], 品名: row[2], 型號: row[3], 規格: row[4],
+            單位: row[5], 庫存: 0, 照片: (row.length > 12 ? row[12] : '')
+          });
+        }
+        materialsMap.get(compositeKey).庫存 += Number(row[6] || 0);
+      }
+    }
+
+    // --- 4. 統整 (清空並寫入期初庫存) ---
+    console.log('月結任務：正在清空當前紀錄分頁...');
+    // getSheetId 是一個新的輔助函式，我們需要建立它
+    const sheetId = spreadsheetInfo.data.sheets.find(s => s.properties.title === recordsSheetName).properties.sheetId;
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      resource: { requests: [{ deleteRange: {
+        range: { sheetId: sheetId, startRowIndex: 1 }, // 從第二行開始刪
+        shiftDimension: 'ROWS'
+      }}]},
+    });
+
+    console.log('月結任務：正在寫入新月份的期初庫存...');
+    const openingBalanceRows = [];
+    const timestamp = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
+    
+    for (const item of materialsMap.values()) {
+      if (item.庫存 !== 0) { // 只結轉有庫存的品項
+        const newRow = [
+          item.分類, `'${item.序號}`, item.品名,
+          item.型號 ? `'${item.型號}` : '', item.規格 ? `'${item.規格}` : '', item.單位,
+          item.庫存, '上月結轉', statusValid, // 類型設定為 "上月結轉"
+          '系統月結', '系統', timestamp, item.照片 || ''
+        ];
+        openingBalanceRows.push(newRow);
+      }
+    }
+
+    if (openingBalanceRows.length > 0) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: process.env.SPREADSHEET_ID,
+        range: recordsSheetName,
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: openingBalanceRows },
+      });
+    }
+    
+    // --- 5. 清除快取並記錄成功日誌 ---
+    clearInventoryCache(CONFIG);
+    const successMessage = `月結成功執行。備份分頁：${backupSheetName}。共結轉 ${openingBalanceRows.length} 筆期初庫存。`;
+    await logSystemEvent({ status: '成功', message: successMessage }, CONFIG);
+    console.log(`月結任務：${successMessage}`);
+
+  } catch (error) {
+    console.error('月結流程發生嚴重錯誤:', error.message);
+    await logSystemEvent({ status: '失敗', message: `月結流程錯誤: ${error.message}` }, CONFIG);
+  }
+}
+
 // 將所有函式匯出
 module.exports = {
   sheets,
@@ -436,4 +581,6 @@ module.exports = {
   voidRecordByRowIndex,
   updateRecordCells,
   uploadImageToDrive,
+  logSystemEvent, // <-- !! 加上這一行
+  monthlyClosing, // <-- !! 加上這一行
 };
